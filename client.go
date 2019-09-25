@@ -59,6 +59,15 @@ func (c *Client) fillRequestData(params Params) Params {
 	return params
 }
 
+// 疼讯敢不敢统一一下参数
+func (c *Client) promotionFillRequestData(params Params) Params {
+	params["mch_appid"] = c.account.appID
+	params["mchid"] = c.account.mchID
+	params["nonce_str"] = nonceStr()
+	params["sign"] = c.Sign(params)
+	return params
+}
+
 // https no cert post
 func (c *Client) postWithoutCert(url string, params Params) (string, error) {
 	h := &http.Client{}
@@ -94,6 +103,37 @@ func (c *Client) postWithCert(url string, params Params) (string, error) {
 	h := &http.Client{Transport: transport}
 	p := c.fillRequestData(params)
 	response, err := h.Post(url, bodyType, strings.NewReader(MapToXml(p)))
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	res, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(res), nil
+}
+
+func (c *Client) promotionPostWithCert(url string, params Params) (string, error) {
+	if c.account.certData == nil {
+		return "", errors.New("证书数据为空")
+	}
+
+	// 将pkcs12证书转成pem
+	cert := pkcs12ToPem(c.account.certData, c.account.mchID)
+
+	config := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+	transport := &http.Transport{
+		TLSClientConfig:    config,
+		DisableCompression: true,
+	}
+	h := &http.Client{Transport: transport}
+	p := c.promotionFillRequestData(params)
+
+	response, err := h.Post(url, bodyType, strings.NewReader(MapToXml(p)))
+
 	if err != nil {
 		return "", err
 	}
@@ -185,6 +225,24 @@ func (c *Client) processResponseXml(xmlStr string) (Params, error) {
 		} else {
 			return nil, errors.New("invalid sign value in XML")
 		}
+	} else {
+		return nil, errors.New("return_code value is invalid in XML")
+	}
+}
+
+// 处理 HTTPS API返回数据，转换成Map对象。不验证签名。
+func (c *Client) processResponseXmlNoSign(xmlStr string) (Params, error) {
+	var returnCode string
+	params := XmlToMap(xmlStr)
+	if params.ContainsKey("return_code") {
+		returnCode = params.GetString("return_code")
+	} else {
+		return nil, errors.New("no return_code in XML")
+	}
+	if returnCode == Fail {
+		return params, nil
+	} else if returnCode == Success {
+		return params, nil
 	} else {
 		return nil, errors.New("return_code value is invalid in XML")
 	}
@@ -385,4 +443,19 @@ func (c *Client) AuthCodeToOpenid(params Params) (Params, error) {
 		return nil, err
 	}
 	return c.processResponseXml(xmlStr)
+}
+
+// 企业付款
+func (c *Client) Transfers(params Params) (Params, error) {
+	var url string
+	if c.account.isSandbox {
+		url = SandboxAuthCodeToOpenidUrl
+	} else {
+		url = TransfersUrl
+	}
+	xmlStr, err := c.promotionPostWithCert(url, params)
+	if err != nil {
+		return nil, err
+	}
+	return c.processResponseXmlNoSign(xmlStr)
 }
